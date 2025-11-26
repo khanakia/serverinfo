@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"time"
 )
 
 type IPInfo struct {
@@ -22,6 +24,11 @@ type InterfaceInfo struct {
 	HardwareAddr string   `json:"hardware_addr"`
 	Flags        []string `json:"flags"`
 	IPs          []IPInfo `json:"ips"`
+}
+
+type IPResponse struct {
+	PublicIP   string          `json:"public_ip,omitempty"`
+	Interfaces []InterfaceInfo `json:"interfaces"`
 }
 
 func flagsToStrings(flags net.Flags) []string {
@@ -52,6 +59,26 @@ func scopeForIP(ip net.IP) string {
 		return "link-local"
 	}
 	return "global"
+}
+
+// getPublicIP fetches the server's public IP from an external service.
+func getPublicIP() (string, error) {
+	client := &http.Client{
+		Timeout: 3 * time.Second,
+	}
+
+	resp, err := client.Get("https://ifconfig.me/ip")
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+
+	return string(b), nil
 }
 
 // getAllInterfaces collects all network interfaces and their addresses.
@@ -125,10 +152,21 @@ func ipHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	publicIP, err := getPublicIP()
+	if err != nil {
+		// Don't fail the whole request if public IP lookup fails; just omit it.
+		log.Printf("failed to get public IP: %v", err)
+	}
+
+	resp := IPResponse{
+		PublicIP:   publicIP,
+		Interfaces: interfaces,
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(interfaces); err != nil {
+	if err := enc.Encode(resp); err != nil {
 		http.Error(w, "failed to encode response: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
